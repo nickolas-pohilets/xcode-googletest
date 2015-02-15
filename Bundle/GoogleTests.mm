@@ -136,6 +136,34 @@ private:
     return _methodName;
 }
 
++ (NSUInteger)numericalPrefixLength:(NSString*)string {
+    NSCharacterSet *decimalDigitCharacterSet = [NSCharacterSet decimalDigitCharacterSet];
+    NSUInteger len = 0;
+    while (len < string.length && [decimalDigitCharacterSet characterIsMember:[string characterAtIndex:len]]) {
+        ++len;
+    }
+    return len;
+}
+
++ (NSString*)normalizeIdentifierComponent:(NSString*)string {
+    NSArray* items = [string componentsSeparatedByCharactersInSet:[NSCharacterSet alphanumericCharacterSet].invertedSet];
+    if (items.count == 1) {
+        return items.firstObject;
+    } else {
+        NSMutableString* retVal = [NSMutableString new];
+        for (NSString* s in items) {
+            if (s.length == 0) {
+                continue;
+            }
+            if (retVal.length > 0) {
+                [retVal appendString:@"_"];
+            }
+            [retVal appendString:s];
+        }
+        return retVal;
+    }
+}
+
 + (id)defaultTestSuite {
     // Pass the command-line arguments to Google Test to support the --gtest options
     NSArray *arguments = [[NSProcessInfo processInfo] arguments];
@@ -154,7 +182,6 @@ private:
     free(argv);
 
     BOOL runDisabledTests = testing::GTEST_FLAG(also_run_disabled_tests);
-    NSCharacterSet *decimalDigitCharacterSet = [NSCharacterSet decimalDigitCharacterSet];
 
     XCTestSuite *testSuite = [GoogleTestSuite testSuiteWithName:NSStringFromClass([self class])];
 
@@ -184,9 +211,32 @@ private:
         // Objective-C names. If they are not the tests will not be displayed properly in
         // the UI. Join the test case name components with '_' rather than '/' to address
         // this.
-        NSString *className = [testCaseNameComponents componentsJoinedByString:@"_"];
+        NSString *className = nil;
+        if (testCaseNameComponents.count == 2 && [testCaseNameComponents[0] isEqualToString:[testCaseNameComponents[1] stringByAppendingString:@"Instance"]]) {
+            className = testCaseNameComponents[1];
+        } else {
+            className = [testCaseNameComponents componentsJoinedByString:@"_"];
+        }
 
         XCTestSuite *testCaseSuite = [XCTestSuite testSuiteWithName:className];
+        
+        NSUInteger maxDigits = 0;
+        std::vector<NSUInteger> maxDigitsPerComponent;
+        for (int testIndex = 0; testIndex < testCase->total_test_count(); testIndex++) {
+            const TestInfo *testInfo = testCase->GetTestInfo(testIndex);
+            NSString *testName = @(testInfo->name());
+            NSArray* testNameComponents = [testName componentsSeparatedByString:@"/"];
+            for (NSUInteger i = 0; i < testNameComponents.count; ++i) {
+                NSUInteger len = [self numericalPrefixLength:testNameComponents[i]];
+                if (i >= maxDigitsPerComponent.size()) {
+                    maxDigitsPerComponent.push_back(len);
+                } else {
+                    maxDigitsPerComponent[i] = std::max(maxDigitsPerComponent[i], len);
+                }
+                maxDigits = std::max(maxDigits, len);
+            }
+        }
+        std::vector<unichar> leadingZeros(maxDigits, '0');
 
         for (int testIndex = 0; testIndex < testCase->total_test_count(); testIndex++) {
             const TestInfo *testInfo = testCase->GetTestInfo(testIndex);
@@ -194,12 +244,40 @@ private:
             if (runDisabledTests == NO && [testName hasPrefix:GoogleTestDisabledPrefix]) {
                 continue;
             }
-
-            // Google Test allows test names starting with a digit, prefix these with an
-            // underscore to create a valid method name.
-            NSString *methodName = testName;
-            if ([methodName length] > 0 && [decimalDigitCharacterSet characterIsMember:[methodName characterAtIndex:0]]) {
-                methodName = [@"_" stringByAppendingString:methodName];
+            
+            NSArray* testNameComponents = [testName componentsSeparatedByString:@"/"];
+            
+            NSString* methodName = nil;
+            if (maxDigits == 0 && testInfo->type_param() == nullptr && testInfo->value_param() == nullptr) {
+                methodName = testName;
+            } else {
+                // Google Test allows test names starting with a digit, prefix these with an
+                // underscore to create a valid method name.
+                NSMutableString* s = [NSMutableString new];
+                for (NSUInteger i = 0; i < testNameComponents.count; ++i) {
+                    NSUInteger len = [self numericalPrefixLength:testNameComponents[i]];
+                    if (i > 0 || len > 0) {
+                        [s appendString:@"_"];
+                    }
+                    if (len > 0 && len < maxDigitsPerComponent[i]) {
+                        NSUInteger extraZerosLen = maxDigitsPerComponent[i] - len;
+                        NSString* extraZeros = [[NSString alloc] initWithCharactersNoCopy:&leadingZeros[0]
+                                                                                   length:extraZerosLen
+                                                                             freeWhenDone:NO];
+                        [s appendString:extraZeros];
+                    }
+                    
+                    [s appendString:testNameComponents[i]];
+                }
+                
+                for (auto p : { testInfo->type_param(), testInfo->value_param() }) {
+                    if (p) {
+                        [s appendString:@"_"];
+                        [s appendString:[self normalizeIdentifierComponent:@(p)]];
+                    }
+                }
+                
+                methodName = s;
             }
 
             NSString *testFilter = [NSString stringWithFormat:@"%@.%@", testCaseName, testName];
